@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.Python
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Bus runtime state (never commit live sockets, logs, registries, or mailboxes)
+.agent-bus/
+*.sock
+*.jsonl
+*.log
+*.pty.log
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

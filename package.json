@@ -1,0 +1,16 @@
+{
+  "name": "inter-agent-bus",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Inter-agent bus: lease-authenticated broker + mirrored Node/Python clients + PTY delivery adapters for live Claude Code / Codex CLI sessions.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "broker": "node broker/broker.js",
+    "test": "node --test tests/broker-smoke.test.js tests/session-control-cli.test.js adapters/claude-pty/contract-tests/adapter-contract.test.js adapters/codex-pty/contract-tests/adapter-contract.test.js"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.0.0"
+  }
+}

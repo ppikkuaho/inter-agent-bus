@@ -1,0 +1,107 @@
+#!/bin/zsh
+# codex-bus — wraps ~/bin/codex to auto-launch the bus adapter for
+# the Codex session being started. Absorbs the two v1.0-shipped gaps so
+# operators don't have to:
+#   (a) patches approval_mode/sandbox_mode into the per-session active-terminal
+#       record (until the wrapper captures these natively, tracked in ROADMAP.md).
+#   (b) launches the codex-app-server adapter with the correct
+#       AGENT_BUS_RUNTIME_SESSION_ID env and stops it when Codex exits.
+#
+# Usage:  codex-bus [codex-args...]     — same arg set as `codex`
+#
+# Env overrides:
+#   AGENT_BUS_ROOT      — bus repo root (default ~/inter-agent-bus)
+#   CODEX_REAL            — real codex launcher to exec (default ~/bin/codex)
+#   CODEX_BUS_APPROVAL_MODE   — policy patch default (default on-request)
+#   CODEX_BUS_SANDBOX_MODE    — policy patch default (default workspace-write)
+#   CODEX_BUS_THREAD_WAIT_SEC — how long to wait for the first-turn thread_id (default 300)
+#
+# Requires: /usr/bin/python3, the bus broker already running. If broker isn't
+# reachable the adapter subprocess will log + exit and codex itself continues.
+
+set -u
+
+BUS_ROOT="${AGENT_BUS_ROOT:-$HOME/inter-agent-bus}"
+CODEX_REAL="${CODEX_REAL:-$HOME/bin/codex}"
+CODEX_RUNTIME="${CODEX_RUNTIME_STATE_DIR:-$HOME/.codex/runtime}"
+TERMS_DIR="$CODEX_RUNTIME/active-terminals"
+THREADS_DIR="$CODEX_RUNTIME/active-threads"
+APPROVAL="${CODEX_BUS_APPROVAL_MODE:-on-request}"
+SANDBOX="${CODEX_BUS_SANDBOX_MODE:-workspace-write}"
+THREAD_WAIT_SEC="${CODEX_BUS_THREAD_WAIT_SEC:-300}"
+
+mkdir -p "$TERMS_DIR" "$THREADS_DIR"
+
+# Snapshot the active-terminal dir BEFORE we start codex so we can identify
+# this session's new record by set difference after.
+TERMS_BEFORE=$(ls -A "$TERMS_DIR" 2>/dev/null | sort || true)
+
+supervise() {
+  local parent_pid=$1
+  local started_at=$(date +%s)
+
+  # 1. Wait for this session's active-terminal record to appear.
+  local new=""
+  for _ in $(seq 1 60); do
+    local now
+    now=$(ls -A "$TERMS_DIR" 2>/dev/null | sort || true)
+    # Set difference: lines in $now that are not in $TERMS_BEFORE
+    new=$(comm -23 <(print -l -- "$now" | grep -v '^$' | sort) <(print -l -- "$TERMS_BEFORE" | grep -v '^$' | sort) | tail -1 | sed 's/\.json$//')
+    [ -n "$new" ] && break
+    sleep 0.5
+  done
+  if [ -z "$new" ]; then
+    print -u 2 "[codex-bus] no new active-terminal record appeared in 30s; bus adapter NOT started."
+    return 0
+  fi
+  print -u 2 "[codex-bus] session=$new"
+
+  # 2. Patch policy fields (idempotent).
+  /usr/bin/python3 "$BUS_ROOT/adapters/codex-app-server/patch_session_policy.py" "$new" "$APPROVAL" "$SANDBOX" >&2
+
+  # 3. Wait for thread_id. Codex assigns it lazily on the first submitted turn.
+  print -u 2 "[codex-bus] waiting up to ${THREAD_WAIT_SEC}s for thread_id (submit a prompt in codex to trigger)..."
+  local tid=""
+  for _ in $(seq 1 $THREAD_WAIT_SEC); do
+    if [ -f "$THREADS_DIR/$new.json" ]; then
+      tid=$(/usr/bin/python3 -c "
+import json, sys
+try:
+    d = json.load(open('$THREADS_DIR/$new.json'))
+    print(d.get('thread_id') or '', end='')
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+    [ -n "$tid" ] && break
+    # Stop waiting if the parent process already exited.
+    if ! kill -0 $parent_pid 2>/dev/null; then
+      print -u 2 "[codex-bus] parent exited before thread_id appeared; aborting adapter start."
+      return 0
+    fi
+    sleep 1
+  done
+  if [ -z "$tid" ]; then
+    print -u 2 "[codex-bus] timed out waiting for thread_id; bus adapter NOT started. Submit a prompt next time."
+    return 0
+  fi
+  print -u 2 "[codex-bus] thread=$tid; starting adapter..."
+
+  # 4. Start the adapter. Broker is assumed running; if not, adapter logs + exits.
+  AGENT_BUS_RUNTIME_SESSION_ID="$new" /usr/bin/python3 "$BUS_ROOT/adapters/codex-app-server/adapter.py" &
+  local apid=$!
+  print -u 2 "[codex-bus] adapter pid=$apid ready for deliveries to session=$new thread=$tid"
+
+  # 5. Wait for parent (codex process) to exit; then stop the adapter cleanly.
+  while kill -0 $parent_pid 2>/dev/null; do sleep 2; done
+  kill $apid 2>/dev/null && print -u 2 "[codex-bus] parent exited; adapter $apid stopped."
+}
+
+# Spawn supervisor in a backgrounded subshell tied to OUR pid. The shell will
+# exec into codex next, preserving the pid — the supervisor watches that pid
+# and cleans up the adapter when codex exits.
+supervise $$ &
+disown
+
+# Replace the shell with the real codex wrapper. All args pass through.
+exec "$CODEX_REAL" "$@"
